@@ -1,23 +1,16 @@
 import os
+import pandas as pd
 from langchain.document_loaders import PyPDFLoader
 from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
-from sentence_transformers import SentenceTransformer
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 import gradio as gr
-import pandas as pd
 
-# Yerel embedding modeli
-class LocalEmbedding:
-    def __init__(self):
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    def embed_documents(self, texts):
-        return self.model.encode(texts, convert_to_tensor=False).tolist()
-
-# Embedding modeli örneği
-embedding = LocalEmbedding()
+# Çevresel değişkenleri yükleme
+load_dotenv()
+embedding_model_path = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Belgeleri yükleme
 def load_documents():
@@ -45,6 +38,7 @@ def load_documents():
         answer_part2 = str(row.get("Standart Madde 2", "")).strip()
         combined_answer = f"{answer_part1}\n\n{answer_part2}"
 
+        # Document formatında oluştur
         documents.append(Document(page_content=f"Soru: {question}\nCevap: {combined_answer}", metadata={"source": "Excel"}))
 
     return documents
@@ -53,32 +47,20 @@ def load_documents():
 def create_vector_store(documents):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     split_docs = text_splitter.split_documents(documents)
-    texts = [doc.page_content for doc in split_docs]
-    metadatas = [doc.metadata for doc in split_docs]
 
-    # Metinleri embedding'lere dönüştür
-    text_embeddings = embedding.model.encode(texts, convert_to_tensor=False)
-
-    # FAISS veritabanını oluştur
-    vector_store = FAISS.from_embeddings(
-        [(text, embedding) for text, embedding in zip(texts, text_embeddings)],
-        embedding=embedding.model,
-        metadatas=metadatas,
-    )
+    # Embedding işlemini uygula ve FAISS oluştur
+    embeddings = HuggingFaceEmbeddings(model_name=embedding_model_path)
+    vector_store = FAISS.from_documents(split_docs, embeddings)
     return vector_store
-
 
 # Sorgulama motoru
 def get_answer(question, vector_store):
-    # Soru için embedding oluştur ve en yakın belgeleri getir
-    query_embedding = embedding.model.encode([question], convert_to_tensor=False)[0]
-    results = vector_store.similarity_search_by_vector(query_embedding, k=5)
-
-    # Yanıtları birleştir
-    combined_answer = "\n\n".join([result.page_content for result in results])
+    retriever = vector_store.as_retriever()
+    result = retriever.get_relevant_documents(question)
+    combined_answer = "\n\n".join([doc.page_content for doc in result])
     return combined_answer
 
-# Gradio UI
+# Ana UI
 def chatbot_ui():
     documents = load_documents()
     vector_store = create_vector_store(documents)
