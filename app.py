@@ -3,7 +3,6 @@ from langchain.document_loaders import PyPDFLoader
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import gradio as gr
@@ -12,7 +11,6 @@ import pandas as pd
 # Yerel embedding modeli
 class LocalEmbedding:
     def __init__(self):
-        # `all-MiniLM-L6-v2` modeli hızlı ve hafif bir embedding modelidir.
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
 
     def embed_documents(self, texts):
@@ -58,14 +56,22 @@ def create_vector_store(documents):
     texts = [doc.page_content for doc in split_docs]
     metadatas = [doc.metadata for doc in split_docs]
 
-    # FAISS vektör veritabanı oluşturma
-    vector_store = FAISS.from_texts(texts, embedding.model.encode, metadatas=metadatas)
+    # Metinleri embedding'lere dönüştür
+    text_embeddings = embedding.model.encode(texts, convert_to_tensor=False)
+
+    # FAISS veritabanını oluştur
+    vector_store = FAISS.from_embeddings(
+        [(text, embedding) for text, embedding in zip(texts, text_embeddings)],
+        embedding=embedding.model,
+        metadatas=metadatas,
+    )
     return vector_store
+
 
 # Sorgulama motoru
 def get_answer(question, vector_store):
     # Soru için embedding oluştur ve en yakın belgeleri getir
-    query_embedding = embedding.model.encode([question])[0]
+    query_embedding = embedding.model.encode([question], convert_to_tensor=False)[0]
     results = vector_store.similarity_search_by_vector(query_embedding, k=5)
 
     # Yanıtları birleştir
