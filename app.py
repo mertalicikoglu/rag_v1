@@ -24,39 +24,49 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found. Please set it in your .env file.")
 
-# Belgeleri yükleme
-def load_documents():
-    file_paths = [
+# Belgeleri yükleme ve gruplandırma
+def load_and_group_documents():
+    # Özel Şartlar Dosyaları
+    special_files = [
+        "docs/Grup_Policesi_Ozel_Sartlari.docx",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Ozel_Sartlari.pdf",
+        "docs/Kisiye_Ozel_TSS_Ozel_Sartlari.pdf"
+    ]
+    special_loaders = [
+        UnstructuredWordDocumentLoader(special_files[0]),
+        PyPDFLoader(special_files[1]),
+        PyPDFLoader(special_files[2]),
+    ]
+    special_documents = []
+    for loader in special_loaders:
+        special_documents.extend(loader.load())
+
+    # Teminat Tabloları Dosyaları
+    general_files = [
         "docs/Grup_TeminatTablosu1.pdf",
         "docs/Grup_TeminatTablosu2.pdf",
-        "docs/Kisiye_Ozel_Saglik_Sigortasi_Ozel_Sartlari.pdf",
         "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu1.pdf",
         "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu2.pdf",
-        "docs/Kisiye_Ozel_TSS_Ozel_Sartlari.pdf",
         "docs/Kisiye_Ozel_TSS_Teminat_Tablosu1.pdf",
         "docs/Kisiye_Ozel_TSS_Teminat_Tablosu2.pdf",
-        "docs/Grup_Policesi_Ozel_Sartlari.docx"
     ]
+    general_loaders = [PyPDFLoader(path) for path in general_files]
+    general_documents = []
+    for loader in general_loaders:
+        general_documents.extend(loader.load())
 
-    loaders = [PyPDFLoader(path) for path in file_paths[:8]] + [UnstructuredWordDocumentLoader(file_paths[8])]
-    
-    documents = []
-    for loader in loaders:
-        documents.extend(loader.load())
-
-    # Excel dosyasını yükleme
+    # Excel Dosyası
     excel_path = "docs/Chatbot_Demo_Sorular.xlsx"
     df = pd.read_excel(excel_path)
-
+    excel_documents = []
     for _, row in df.iterrows():
         question = str(row.get("Soru", "")).strip()
         answer_part1 = str(row.get("Standart Madde 1", "")).strip()
         answer_part2 = str(row.get("Standart Madde 2", "")).strip()
         combined_answer = f"{answer_part1}\n\n{answer_part2}"
-        
-        documents.append(Document(page_content=f"Soru: {question}\nCevap: {combined_answer}", metadata={"source": "Excel"}))
+        excel_documents.append(Document(page_content=f"Soru: {question}\nCevap: {combined_answer}", metadata={"source": "Excel"}))
 
-    return documents
+    return special_documents, general_documents, excel_documents
 
 # Belgeleri vektör veritabanına dönüştürme
 def create_vector_store(documents):
@@ -86,22 +96,42 @@ class PriorityRetriever(BaseRetriever, BaseModel):
         return []
 
 # Soruya yanıt verme
-def get_answer(question, vector_store):
-    llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+# Soruya yanıt verme
+def get_answer(question, special_vector_store, general_vector_store, excel_vector_store):
+    llm = ChatOpenAI(model_name="gpt-4", temperature=0.7)
     retrievers = [
-        vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10})
+        special_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
+        general_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
+        excel_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
     ]
+    
+    # Her retriever için belgeleri kontrol et ve yazdır
+    # for idx, retriever in enumerate(retrievers):
+    #     docs = retriever.get_relevant_documents(question)
+    #     print(f"Retriever {idx + 1} Retrieved Documents:")
+    #     for doc in docs:
+    #         print(f"- Content: {doc.page_content[:100]}...")  # İlk 100 karakteri göster
+    #         print(f"  Metadata: {doc.metadata}")
+    
+    # Öncelikli retriever sırasını kullan
     retriever = PriorityRetriever(retrievers=retrievers)
+    docs = retriever.get_relevant_documents(question)
+    print("Retrieved Documents:", docs)
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
-    return qa_chain.run(question)
+    return qa_chain.invoke({"query": question})
+
 
 # Gradio arayüzü
 def chatbot_ui():
-    documents = load_documents()
-    vector_store = create_vector_store(documents)
+    special_docs, general_docs, excel_docs = load_and_group_documents()
+
+    # Her grup için vektör veritabanı oluşturma
+    special_vector_store = create_vector_store(special_docs)
+    general_vector_store = create_vector_store(general_docs)
+    excel_vector_store = create_vector_store(excel_docs)
 
     def chatbot_response(question):
-        return get_answer(question, vector_store)
+        return get_answer(question, special_vector_store, general_vector_store, excel_vector_store)
 
     iface = gr.Interface(fn=chatbot_response, inputs="text", outputs="text", title="Sigorta Bilgi Botu")
     iface.launch()
