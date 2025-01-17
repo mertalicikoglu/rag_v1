@@ -1,29 +1,79 @@
 import os
-import pandas as pd
-from langchain.document_loaders import PyPDFLoader
-from langchain.schema import Document
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.document_loaders import PyPDFLoader, UnstructuredWordDocumentLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain_community.chat_models import ChatOpenAI
+from langchain.chains.retrieval_qa.base import RetrievalQA
+from langchain.schema import Document
 from dotenv import load_dotenv
 import gradio as gr
+import pandas as pd
+import openai
 
-# Çevresel değişkenleri yükleme
+import nltk
+
+# Gerekli NLTK kaynaklarını indir
+nltk.download('punkt_tab')
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger_eng')
+
+# OpenAI API Anahtarını yükle
 load_dotenv()
-embedding_model_path = "sentence-transformers/all-MiniLM-L6-v2"
+openai_api_key = os.getenv("OPENAI_API_KEY")
 
-# Belgeleri yükleme
+import openai
+
+# Doğru API anahtarınızı buraya yazın
+openai.api_key = "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"
+
+try:
+    # Mevcut modelleri listeleme isteği
+    models = openai.Model.list()
+    print("API Key is valid. Available models:")
+    for model in models['data']:
+        print(f"- {model['id']}")
+except openai.error.AuthenticationError as e:
+    print("Invalid API Key:", e)
+except Exception as e:
+    print("An unexpected error occurred:", e)
+
+
+
+
+
+if not openai_api_key:
+    raise ValueError("OPENAI_API_KEY not found. Please set it in your .env file.")
+
 def load_documents():
-    loaders = [
-        PyPDFLoader("docs/Grup_TeminatTablosu1.pdf"),
-        PyPDFLoader("docs/Grup_TeminatTablosu2.pdf"),
-        PyPDFLoader("docs/Kisiye_Ozel_Saglik_Sigortasi_Ozel_Sartlari.pdf"),
-        PyPDFLoader("docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu1.pdf"),
-        PyPDFLoader("docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu2.pdf"),
-        PyPDFLoader("docs/Kisiye_Ozel_TSS_Ozel_Sartlari.pdf"),
-        PyPDFLoader("docs/Kisiye_Ozel_TSS_Teminat_Tablosu1.pdf"),
-        PyPDFLoader("docs/Kisiye_Ozel_TSS_Teminat_Tablosu2.pdf"),
+    file_paths = [
+        "docs/Grup_TeminatTablosu1.pdf",
+        "docs/Grup_TeminatTablosu2.pdf",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Ozel_Sartlari.pdf",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu1.pdf",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu2.pdf",
+        "docs/Kisiye_Ozel_TSS_Ozel_Sartlari.pdf",
+        "docs/Kisiye_Ozel_TSS_Teminat_Tablosu1.pdf",
+        "docs/Kisiye_Ozel_TSS_Teminat_Tablosu2.pdf",
+        "docs/Grup_Policesi_Ozel_Sartlari.docx"
     ]
+
+    for path in file_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"File not found: {path}")
+
+    loaders = [
+        PyPDFLoader(file_paths[0]),
+        PyPDFLoader(file_paths[1]),
+        PyPDFLoader(file_paths[2]),
+        PyPDFLoader(file_paths[3]),
+        PyPDFLoader(file_paths[4]),
+        PyPDFLoader(file_paths[5]),
+        PyPDFLoader(file_paths[6]),
+        PyPDFLoader(file_paths[7]),
+        UnstructuredWordDocumentLoader(file_paths[8])
+    ]
+    
     documents = []
     for loader in loaders:
         documents.extend(loader.load())
@@ -37,30 +87,24 @@ def load_documents():
         answer_part1 = str(row.get("Standart Madde 1", "")).strip()
         answer_part2 = str(row.get("Standart Madde 2", "")).strip()
         combined_answer = f"{answer_part1}\n\n{answer_part2}"
-
-        # Document formatında oluştur
+        
         documents.append(Document(page_content=f"Soru: {question}\nCevap: {combined_answer}", metadata={"source": "Excel"}))
 
     return documents
 
-# Belgeleri parçalara ayırma ve vektör veritabanı oluşturma
 def create_vector_store(documents):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     split_docs = text_splitter.split_documents(documents)
-
-    # Embedding işlemini uygula ve FAISS oluştur
+    embedding_model_path = "sentence-transformers/paraphrase-MiniLM-L6-v2"
     embeddings = HuggingFaceEmbeddings(model_name=embedding_model_path)
     vector_store = FAISS.from_documents(split_docs, embeddings)
     return vector_store
 
-# Sorgulama motoru
 def get_answer(question, vector_store):
-    retriever = vector_store.as_retriever()
-    result = retriever.get_relevant_documents(question)
-    combined_answer = "\n\n".join([doc.page_content for doc in result])
-    return combined_answer
+    llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+    qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vector_store.as_retriever())
+    return qa_chain.run(question)
 
-# Ana UI
 def chatbot_ui():
     documents = load_documents()
     vector_store = create_vector_store(documents)
