@@ -9,9 +9,8 @@ from langchain.schema import Document
 from dotenv import load_dotenv
 import gradio as gr
 import pandas as pd
-import openai
-
 import nltk
+import openai
 
 # Gerekli NLTK kaynaklarını indir
 nltk.download('punkt_tab')
@@ -22,29 +21,13 @@ nltk.download('averaged_perceptron_tagger_eng')
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-import openai
-
-# Doğru API anahtarınızı buraya yazın
-openai.api_key = "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"
-
-try:
-    # Mevcut modelleri listeleme isteği
-    models = openai.Model.list()
-    print("API Key is valid. Available models:")
-    for model in models['data']:
-        print(f"- {model['id']}")
-except openai.error.AuthenticationError as e:
-    print("Invalid API Key:", e)
-except Exception as e:
-    print("An unexpected error occurred:", e)
-
-
-
-
-
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found. Please set it in your .env file.")
 
+
+openai.api_key = openai_api_key
+
+# Belgeleri yükleme
 def load_documents():
     file_paths = [
         "docs/Grup_TeminatTablosu1.pdf",
@@ -92,6 +75,7 @@ def load_documents():
 
     return documents
 
+# Belgeleri vektör veritabanına dönüştürme
 def create_vector_store(documents):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     split_docs = text_splitter.split_documents(documents)
@@ -100,11 +84,13 @@ def create_vector_store(documents):
     vector_store = FAISS.from_documents(split_docs, embeddings)
     return vector_store
 
+# Soruya yanıt verme
 def get_answer(question, vector_store):
     llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=vector_store.as_retriever())
     return qa_chain.run(question)
 
+# Gradio arayüzü
 def chatbot_ui():
     documents = load_documents()
     vector_store = create_vector_store(documents)
