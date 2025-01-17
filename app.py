@@ -5,12 +5,12 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
 from langchain_community.chat_models import ChatOpenAI
 from langchain.chains.retrieval_qa.base import RetrievalQA
-from langchain.schema import Document
+from langchain.schema import Document, BaseRetriever
+from pydantic import BaseModel
 from dotenv import load_dotenv
 import gradio as gr
 import pandas as pd
 import nltk
-import openai
 
 # Gerekli NLTK kaynaklarını indir
 nltk.download('punkt_tab')
@@ -24,46 +24,25 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found. Please set it in your .env file.")
 
-
-openai.api_key = openai_api_key
-
-# Belge grupları
-priority_documents = {
-    "special_conditions": [
-        "docs/Grup_Policesi_Ozel_Sartlari.docx",
-        "docs/Kisiye_Ozel_Saglik_Sigortasi_Ozel_Sartlari.pdf",
-        "docs/Kisiye_Ozel_TSS_Ozel_Sartlari.pdf"
-    ],
-    "coverage_tables": [
-        "docs/Grup_TeminatTablosu1.pdf",
-        "docs/Grup_TeminatTablosu2.pdf",
-        "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu1.pdf",
-        "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu2.pdf",
-        "docs/Kisiye_Ozel_TSS_Teminat_Tablosu1.pdf",
-        "docs/Kisiye_Ozel_TSS_Teminat_Tablosu2.pdf"
-    ]
-}
-
 # Belgeleri yükleme
 def load_documents():
+    file_paths = [
+        "docs/Grup_TeminatTablosu1.pdf",
+        "docs/Grup_TeminatTablosu2.pdf",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Ozel_Sartlari.pdf",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu1.pdf",
+        "docs/Kisiye_Ozel_Saglik_Sigortasi_Teminat_Tablosu2.pdf",
+        "docs/Kisiye_Ozel_TSS_Ozel_Sartlari.pdf",
+        "docs/Kisiye_Ozel_TSS_Teminat_Tablosu1.pdf",
+        "docs/Kisiye_Ozel_TSS_Teminat_Tablosu2.pdf",
+        "docs/Grup_Policesi_Ozel_Sartlari.docx"
+    ]
+
+    loaders = [PyPDFLoader(path) for path in file_paths[:8]] + [UnstructuredWordDocumentLoader(file_paths[8])]
+    
     documents = []
-
-    for doc_type, file_paths in priority_documents.items():
-        for path in file_paths:
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"File not found: {path}")
-
-            if path.endswith(".pdf"):
-                loader = PyPDFLoader(path)
-            elif path.endswith(".docx"):
-                loader = UnstructuredWordDocumentLoader(path)
-            else:
-                continue
-
-            loaded_docs = loader.load()
-            for doc in loaded_docs:
-                doc.metadata["type"] = doc_type  # Doküman türünü metadata olarak ekle
-                documents.append(doc)
+    for loader in loaders:
+        documents.extend(loader.load())
 
     # Excel dosyasını yükleme
     excel_path = "docs/Chatbot_Demo_Sorular.xlsx"
@@ -74,7 +53,7 @@ def load_documents():
         answer_part1 = str(row.get("Standart Madde 1", "")).strip()
         answer_part2 = str(row.get("Standart Madde 2", "")).strip()
         combined_answer = f"{answer_part1}\n\n{answer_part2}"
-
+        
         documents.append(Document(page_content=f"Soru: {question}\nCevap: {combined_answer}", metadata={"source": "Excel"}))
 
     return documents
@@ -88,29 +67,31 @@ def create_vector_store(documents):
     vector_store = FAISS.from_documents(split_docs, embeddings)
     return vector_store
 
-# Özel sıralama mantığı
-class PriorityRetriever:
-    def __init__(self, vector_store):
-        self.vector_store = vector_store
+# Önceliklendirilmiş Retriever
+class PriorityRetriever(BaseRetriever, BaseModel):
+    retrievers: list[BaseRetriever]
 
-    def retrieve(self, query):
-        all_results = self.vector_store.similarity_search(query, k=10)
-        # Özel şartlar öncelikli, ardından teminat tabloları
-        special_results = [doc for doc in all_results if doc.metadata.get("type") == "special_conditions"]
-        coverage_results = [doc for doc in all_results if doc.metadata.get("type") == "coverage_tables"]
+    def get_relevant_documents(self, query):
+        for retriever in self.retrievers:
+            docs = retriever.get_relevant_documents(query)
+            if docs:
+                return docs
+        return []
 
-        # Öncelikli sonuçları birleştir
-        ordered_results = special_results + coverage_results
-        return ordered_results
+    async def aget_relevant_documents(self, query):
+        for retriever in self.retrievers:
+            docs = await retriever.aget_relevant_documents(query)
+            if docs:
+                return docs
+        return []
 
 # Soruya yanıt verme
 def get_answer(question, vector_store):
-    retrieverprint = vector_store.as_retriever()
-    docs = retrieverprint.get_relevant_documents(question)
-    print("Retrieved Documents:", docs)
-    
-    retriever = PriorityRetriever(vector_store)
     llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+    retrievers = [
+        vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10})
+    ]
+    retriever = PriorityRetriever(retrievers=retrievers)
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
     return qa_chain.run(question)
 
