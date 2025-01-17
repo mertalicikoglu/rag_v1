@@ -1,0 +1,12 @@
+langchain
+openai
+llama-index
+faiss-cpu
+pypdf
+python-docx
+gradio
+pandas
+openpyxl
+langchain-community
+sentence-transformers
+ 
