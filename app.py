@@ -8,23 +8,34 @@ from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain.schema import Document, BaseRetriever
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import gradio as gr
 import pandas as pd
+import gradio as gr
 import nltk
+import pdfplumber
 
 # Gerekli NLTK kaynaklarını indir
-nltk.download('punkt_tab')
 nltk.download('punkt')
-nltk.download('averaged_perceptron_tagger_eng')
+nltk.download('averaged_perceptron_tagger')
 
 # OpenAI API Anahtarını yükle
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
-
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found. Please set it in your .env file.")
 
-# Belgeleri yükleme ve gruplandırma
+# PDF tablolarını ayrıştırma
+def parse_table_from_pdf(pdf_path):
+    documents = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    row_text = ' | '.join(str(cell) for cell in row if cell)
+                    documents.append(Document(page_content=row_text, metadata={"source": pdf_path}))
+    return documents
+
+# Dökümanları yükleme ve kategorize etme
 def load_and_group_documents():
     # Özel Şartlar Dosyaları
     special_files = [
@@ -50,10 +61,9 @@ def load_and_group_documents():
         "docs/Kisiye_Ozel_TSS_Teminat_Tablosu1.pdf",
         "docs/Kisiye_Ozel_TSS_Teminat_Tablosu2.pdf",
     ]
-    general_loaders = [PyPDFLoader(path) for path in general_files]
     general_documents = []
-    for loader in general_loaders:
-        general_documents.extend(loader.load())
+    for path in general_files:
+        general_documents.extend(parse_table_from_pdf(path))
 
     # Excel Dosyası
     excel_path = "docs/Chatbot_Demo_Sorular.xlsx"
@@ -68,16 +78,26 @@ def load_and_group_documents():
 
     return special_documents, general_documents, excel_documents
 
-# Belgeleri vektör veritabanına dönüştürme
-def create_vector_store(documents):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    split_docs = text_splitter.split_documents(documents)
-    embedding_model_path = "sentence-transformers/paraphrase-MiniLM-L6-v2"
-    embeddings = HuggingFaceEmbeddings(model_name=embedding_model_path)
+# Dökümanları anlamlı şekilde bölme
+def advanced_chunk_split(documents):
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        separators=["\n\n", "\n", ".", " "]
+    )
+    split_docs = []
+    for doc in documents:
+        split_docs.extend(text_splitter.split_text(doc.page_content))
+    return [Document(page_content=chunk, metadata=doc.metadata) for chunk in split_docs]
+
+# Vektör veritabanı oluşturma
+def create_vector_store(documents, model_name):
+    split_docs = advanced_chunk_split(documents)
+    embeddings = HuggingFaceEmbeddings(model_name=model_name)
     vector_store = FAISS.from_documents(split_docs, embeddings)
     return vector_store
 
-# Önceliklendirilmiş Retriever
+# Öncelikli Retriever
 class PriorityRetriever(BaseRetriever, BaseModel):
     retrievers: list[BaseRetriever]
 
@@ -95,43 +115,37 @@ class PriorityRetriever(BaseRetriever, BaseModel):
                 return docs
         return []
 
-# Soruya yanıt verme
-# Soruya yanıt verme
-def get_answer(question, special_vector_store, general_vector_store, excel_vector_store):
+# Soruları anlamlandırarak yanıtlama
+def enhanced_get_answer(question, special_vector_store, general_vector_store, excel_vector_store):
+    # Soruları kategorilere ayır
+    category = "teminat" if any(keyword in question.lower() for keyword in ["aşı", "serum", "ilaç"]) else "genel"
+    
+    retrievers = {
+        "special": special_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
+        "general": general_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
+        "excel": excel_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
+    }
+    
+    if category == "teminat":
+        retriever = PriorityRetriever(retrievers=[retrievers["special"], retrievers["general"]])
+    else:
+        retriever = PriorityRetriever(retrievers=[retrievers["excel"], retrievers["special"], retrievers["general"]])
+
     llm = ChatOpenAI(model_name="gpt-4", temperature=0.7)
-    retrievers = [
-        special_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
-        general_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
-        excel_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 10}),
-    ]
-    
-    # Her retriever için belgeleri kontrol et ve yazdır
-    # for idx, retriever in enumerate(retrievers):
-    #     docs = retriever.get_relevant_documents(question)
-    #     print(f"Retriever {idx + 1} Retrieved Documents:")
-    #     for doc in docs:
-    #         print(f"- Content: {doc.page_content[:100]}...")  # İlk 100 karakteri göster
-    #         print(f"  Metadata: {doc.metadata}")
-    
-    # Öncelikli retriever sırasını kullan
-    retriever = PriorityRetriever(retrievers=retrievers)
-    docs = retriever.get_relevant_documents(question)
-    print("Retrieved Documents:", docs)
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
     return qa_chain.invoke({"query": question})
 
-
-# Gradio arayüzü
+# Gradio Arayüzü
 def chatbot_ui():
     special_docs, general_docs, excel_docs = load_and_group_documents()
 
-    # Her grup için vektör veritabanı oluşturma
-    special_vector_store = create_vector_store(special_docs)
-    general_vector_store = create_vector_store(general_docs)
-    excel_vector_store = create_vector_store(excel_docs)
+    embedding_model_path = "sentence-transformers/all-mpnet-base-v2"
+    special_vector_store = create_vector_store(special_docs, embedding_model_path)
+    general_vector_store = create_vector_store(general_docs, embedding_model_path)
+    excel_vector_store = create_vector_store(excel_docs, embedding_model_path)
 
     def chatbot_response(question):
-        return get_answer(question, special_vector_store, general_vector_store, excel_vector_store)
+        return enhanced_get_answer(question, special_vector_store, general_vector_store, excel_vector_store)
 
     iface = gr.Interface(fn=chatbot_response, inputs="text", outputs="text", title="Sigorta Bilgi Botu")
     iface.launch()

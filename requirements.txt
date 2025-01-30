@@ -9,4 +9,8 @@ pandas
 openpyxl
 langchain-community
 sentence-transformers
- 
+pypdf
+langchain
+chromadb # Vector storage
+pytest
+boto3
